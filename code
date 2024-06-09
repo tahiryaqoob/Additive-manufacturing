@@ -1,0 +1,137 @@
+import os
+import tifffile
+import imageio
+import numpy as np
+from PIL import Image
+import cv2
+import scipy.stats as stats
+
+# Define paths and regions
+folder_path = "E:\\CMS\\RP\\PA12_C1_R1\\Data"
+output_folder = "D:\\SB\\Processed_Data"
+
+upper_box = [148, 58, 294, 158]
+middle_box = [140, 520, 294, 620]
+lower_box = [140, 980, 294, 1100]
+
+files = os.listdir(folder_path)
+
+def process_picture(image, left, upper, right, lower):
+    cropped_image = image[upper:lower, left:right]
+    preimage = cv2.GaussianBlur(cropped_image, (7, 7), 0)
+    preimage = cv2.erode(preimage, np.ones((1, 1)), iterations=1)
+    rotated_image = cv2.rotate(preimage, cv2.ROTATE_90_CLOCKWISE)
+    return rotated_image
+
+def calculate_slope(data):
+    x = np.arange(len(data))
+    slope, _ = np.polyfit(x, data, 1)
+    return slope
+
+def calculate_z_score(data):
+    return (data - np.mean(data)) / np.std(data)
+
+def sliding_window_statistics(data, window_size):
+    results = []
+    for i in range(0, len(data) - window_size + 1):
+        window = data[i:i + window_size]
+        window_stats = {
+            'mean': np.mean(window),
+            'std_dev': np.std(window),
+            'max': np.max(window),
+            'min': np.min(window),
+            'median': np.median(window),
+            'sum': np.sum(window),
+            'kurtosis': stats.kurtosis(window),
+            'skewness': stats.skew(window),
+            'slope': calculate_slope(window),
+            'z_score': calculate_z_score(window)
+        }
+        results.append(window_stats)
+    return results
+
+def calculate_pixel_statistics(folder_path):
+    files = os.listdir(folder_path)
+    statistics = []
+
+    for file in files:
+        image_path = os.path.join(folder_path, file)
+        with Image.open(image_path) as image:
+            image_array = np.array(image)
+            image_intensity = image_array.astype(np.uint8).flatten()
+
+        stats_dict = {
+            'mean': np.mean(image_intensity),
+            'std_dev': np.std(image_intensity),
+            'max': np.max(image_intensity),
+            'min': np.min(image_intensity),
+            'median': np.median(image_intensity),
+            'sum': np.sum(image_intensity),
+            'kurtosis': stats.kurtosis(image_intensity),
+            'skewness': stats.skew(image_intensity),
+            'slope': calculate_slope(image_intensity),
+            'z_score': calculate_z_score(image_intensity)
+        }
+        statistics.append(stats_dict)
+
+        # Calculate sliding window statistics
+        window_size = 50  # Example window size
+        sliding_stats = sliding_window_statistics(image_intensity, window_size)
+
+    return statistics, sliding_stats
+
+for i in files:
+    folder_name = i.replace('.tif', '')
+    image_path = os.path.join(folder_path, i)
+    
+    for subfolder in ["Cropped_Tif", "Full_Pictures", "Statistics"]:
+        os.makedirs(os.path.join(output_folder, subfolder, folder_name), exist_ok=True)
+        for sub_subfolder in ["First", "Second", "Third"]:
+            if subfolder == "Cropped_Tif":
+                os.makedirs(os.path.join(output_folder, subfolder, folder_name, sub_subfolder), exist_ok=True)
+    
+    with tifffile.TiffFile(image_path) as tif:
+        image = tif.series[0].asarray()
+        height, width, num_slices = image.shape
+
+    max_intensity = np.max(image)
+    min_intensity = np.min(image)
+
+    scaled_image = ((image - min_intensity) / (max_intensity - min_intensity)) * 65535
+
+    for n in range(num_slices):
+        output_file_path = os.path.join(output_folder, "Full_Pictures", folder_name, f'{folder_name}_slice_{n+1}.png')
+        image_slice = scaled_image[:, :, n].astype(np.uint16)
+        imageio.imwrite(output_file_path, image_slice)
+
+        image_cv = cv2.imread(output_file_path, cv2.IMREAD_UNCHANGED)
+        rotated_image1 = process_picture(image_cv, *upper_box)
+        rotated_image2 = process_picture(image_cv, *middle_box)
+        rotated_image3 = process_picture(image_cv, *lower_box)
+
+        cv2.imwrite(os.path.join(output_folder, "Cropped_Tif", folder_name, "First", f'{folder_name}_first_{n+1}.png'), rotated_image1)
+        cv2.imwrite(os.path.join(output_folder, "Cropped_Tif", folder_name, "Second", f'{folder_name}_second_{n+1}.png'), rotated_image2)
+        cv2.imwrite(os.path.join(output_folder, "Cropped_Tif", folder_name, "Third", f'{folder_name}_third_{n+1}.png'), rotated_image3)
+
+    first_stats, first_sliding_stats = calculate_pixel_statistics(os.path.join(output_folder, "Cropped_Tif", folder_name, "First"))
+    second_stats, second_sliding_stats = calculate_pixel_statistics(os.path.join(output_folder, "Cropped_Tif", folder_name, "Second"))
+    third_stats, third_sliding_stats = calculate_pixel_statistics(os.path.join(output_folder, "Cropped_Tif", folder_name, "Third"))
+
+    with open(os.path.join(output_folder, "Statistics", folder_name, f'{folder_name}_statistics.txt'), 'w') as f:
+        for stats in first_stats:
+            f.write(f"First: {stats}\n")
+        for stats in second_stats:
+            f.write(f"Second: {stats}\n")
+        for stats in third_stats:
+            f.write(f"Third: {stats}\n")
+
+    with open(os.path.join(output_folder, "Statistics", folder_name, f'{folder_name}_sliding_window_statistics.txt'), 'w') as f:
+        f.write("First:\n")
+        for stats in first_sliding_stats:
+            f.write(f"{stats}\n")
+        f.write("Second:\n")
+        for stats in second_sliding_stats:
+            f.write(f"{stats}\n")
+        f.write("Third:\n")
+        for stats in third_sliding_stats:
+            f.write(f"{stats}\n")
