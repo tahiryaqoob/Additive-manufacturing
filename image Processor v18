@@ -1,0 +1,161 @@
+import os
+import tifffile
+import imageio
+import numpy as np
+from PIL import Image
+import cv2
+from scipy.stats import kurtosis, skew, zscore
+from scipy import stats
+import pandas as pd
+
+folder_path = r"C:\Users\tahir\Desktop\Python\Tiff_data"
+output_folder = r"C:\Users\tahir\Desktop\Python\Processed_Data"
+
+upper_box = [148, 58, 294, 158]
+middle_box = [114, 492, 302, 630]
+lower_box = [82, 974, 294, 1120]
+
+first_coords = [28, 15, 86, 145]
+second_coords = [34, 2, 96, 153]
+third_coords = [39, 3, 100, 153]
+
+files = os.listdir(folder_path)
+
+def process_picture(image, left, upper, right, lower):
+    cropped_image = image[upper:lower, left:right]
+    preimage = cv2.GaussianBlur(cropped_image, (7, 7), 0)
+    preimage = cv2.erode(preimage, np.ones((1, 1)), iterations=1)
+    rotated_image = cv2.rotate(preimage, cv2.ROTATE_90_CLOCKWISE)
+    img_norm = (rotated_image - np.min(rotated_image)) / (np.max(rotated_image) - np.min(rotated_image))
+    img_stretched = np.clip((img_norm - 0.1) / (0.5), 0, 1)
+    img_normalized_255 = (img_stretched * 255).astype(np.uint8)
+    return img_normalized_255
+
+def calculate_pixel_statistics(folder_path, coords):
+    files = os.listdir(folder_path)
+    num_columns = coords[2] - coords[0]
+    
+    col_stats = {
+        "mean_intensity": [],
+        "std_dev_intensity": [],
+        "median_intensity": [],
+        "kurtosis": [],
+        "skewness": [],
+        "slope": [],
+        "z_scores": []
+    }
+    
+    for file in files:
+        image_path = os.path.join(folder_path, file)
+        with Image.open(image_path) as image:
+            image_array = np.array(image)
+            cropped_image = image_array[coords[1]:coords[3], coords[0]:coords[2]]
+        
+        image_stats = {
+            "mean_intensity": [],
+            "std_dev_intensity": [],
+            "median_intensity": [],
+            "kurtosis": [],
+            "skewness": [],
+            "slope": [],
+            "z_scores": []
+        }
+        
+        for col in range(cropped_image.shape[1]):
+            col_data = cropped_image[:, col]
+
+            mean_intensity = np.mean(col_data)
+            std_dev_intensity = np.std(col_data)
+            median_intensity = np.median(col_data)
+            kurtosis_val = kurtosis(col_data)
+            skewness_val = skew(col_data)
+
+            x = np.arange(len(col_data))
+            slope, _, _, _, _ = stats.linregress(x, col_data)
+
+            z_scores = zscore(col_data)
+
+            image_stats["mean_intensity"].append(mean_intensity)
+            image_stats["std_dev_intensity"].append(std_dev_intensity)
+            image_stats["median_intensity"].append(median_intensity)
+            image_stats["kurtosis"].append(kurtosis_val)
+            image_stats["skewness"].append(skewness_val)
+            image_stats["slope"].append(slope)
+            image_stats["z_scores"].append(z_scores)
+        
+        for key in col_stats.keys():
+            col_stats[key].append(image_stats[key])
+            
+    return col_stats
+
+def create_directories(output_folder, folder_name):
+    paths = [
+        os.path.join(output_folder, subfolder, folder_name, sub_subfolder)
+        for subfolder in ["Cropped_Tif", "Full_Pictures", "Statistics"]
+        for sub_subfolder in (["First", "Second", "Third"] if subfolder == "Cropped_Tif" else [""])
+    ]
+    for path in paths:
+        os.makedirs(path, exist_ok=True)
+
+def save_statistics_to_excel(statistics, folder_name, folder_type):
+    folder_path = os.path.join(output_folder, "Statistics", folder_name)
+    os.makedirs(folder_path, exist_ok=True)
+    file_path = os.path.join(folder_path, f"{folder_type}_statistics.xlsx")
+    
+    data = {
+        "image": []
+    }
+    
+    for stat_name in statistics.keys():
+        data[stat_name] = []
+    
+    for idx, image_stats in enumerate(statistics["mean_intensity"]):
+        data["image"].append(f"image {idx + 1}")
+        for stat_name in statistics.keys():
+            if stat_name != "image":
+                data[stat_name].append(statistics[stat_name][idx])
+    
+    df = pd.DataFrame(data)
+    df.to_excel(file_path, index=False)
+
+for i in files:
+    if not i.endswith('.tif'):
+        continue
+
+    folder_name = i.replace('.tif', '')
+    image_path = os.path.join(folder_path, i)
+    create_directories(output_folder, folder_name)
+
+    with tifffile.TiffFile(image_path) as tif:
+        image = tif.series[0].asarray()
+        height, width, num_slices = image.shape
+
+    max_intensity = np.max(image)
+    min_intensity = np.min(image)
+
+    scaled_image = ((image - min_intensity) / (max_intensity - min_intensity)) * 65535
+
+    for n in range(num_slices):
+        output_file_path = os.path.join(output_folder, "Full_Pictures", folder_name, f'{folder_name}_slice_{n+1}.png')
+        image_slice = scaled_image[:, :, n].astype(np.uint16)
+        imageio.imwrite(output_file_path, image_slice)
+
+        image_cv = cv2.imread(output_file_path, cv2.IMREAD_UNCHANGED)
+        rotated_image1 = process_picture(image_cv, *upper_box)
+        rotated_image2 = process_picture(image_cv, *middle_box)
+        rotated_image3 = process_picture(image_cv, *lower_box)
+
+        cv2.imwrite(os.path.join(output_folder, "Cropped_Tif", folder_name, "First", f'{folder_name}_first_{n+1}.png'), rotated_image1)
+        cv2.imwrite(os.path.join(output_folder, "Cropped_Tif", folder_name, "Second", f'{folder_name}_second_{n+1}.png'), rotated_image2)
+        cv2.imwrite(os.path.join(output_folder, "Cropped_Tif", folder_name, "Third", f'{folder_name}_third_{n+1}.png'), rotated_image3)
+
+    first_stats = calculate_pixel_statistics(os.path.join(output_folder, "Cropped_Tif", folder_name, "First"), first_coords)
+    second_stats = calculate_pixel_statistics(os.path.join(output_folder, "Cropped_Tif", folder_name, "Second"), second_coords)
+    third_stats = calculate_pixel_statistics(os.path.join(output_folder, "Cropped_Tif", folder_name, "Third"), third_coords)
+
+    # Save statistics for the first folder
+    save_statistics_to_excel(first_stats, folder_name, 'First')
+    # Save statistics for the second folder
+    save_statistics_to_excel(second_stats, folder_name, 'Second')
+    # Save statistics for the third folder
+    save_statistics_to_excel(third_stats, folder_name, 'Third')
